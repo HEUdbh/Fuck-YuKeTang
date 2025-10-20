@@ -297,13 +297,7 @@ func InitFiles() {
 		os.MkdirAll("./ppts", os.ModePerm)
 		log.Println("-------------创建ppts文件夹成功-------------")
 	}
-	if _, err := os.Stat("./bank.json"); os.IsNotExist(err) {
-		// 创建bank.json文件
-		os.Create("./bank.json")
-		// 写入 [],并保存
-		os.WriteFile("./bank.json", []byte("[]"), 0644)
-		log.Println("-------------创建bank.json文件成功-------------")
-	}
+	// 不再创建bank.json文件，完全依赖远程API
 	if _, err := os.Stat("./config.yml"); os.IsNotExist(err) {
 		// 创建config.yml文件,并写入默认配置
 		file, err := os.Create("./config.yml")

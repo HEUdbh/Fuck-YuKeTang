@@ -194,101 +194,6 @@ func GetLessonOtherInfo(sessionid string, lessonId string) (string, string, stri
 	return lessonToken, identityId, auth
 }
 
-// UpdateBanks 函数功能：更新题库，参数：presentationID（string），返回值：无
-func UpdateBanks(presentationID string) {
-	// 读取 JSON 文件
-	filePath := fmt.Sprintf("./ppts/%s.json", presentationID)
-	fileData, err := os.ReadFile(filePath)
-	if err != nil {
-		log.Println("Error reading file:", err)
-		return
-	}
-
-	// 使用 gjson 解析文件
-	slides := gjson.Get(string(fileData), "data.slides")
-
-	var qaList []map[string]interface{}
-
-	slides.ForEach(func(key, value gjson.Result) bool {
-		// 如果 slide 中包含 problem
-		if value.Get("problem").Exists() {
-			problem := value.Get("problem")
-			problemID := problem.Get("problemId").String()
-			problemType := problem.Get("problemType").Int()
-			question := problem.Get("body").String()
-
-			// 获取 answers 或 result 字段
-			answers := problem.Get("answers")
-			if !answers.Exists() {
-				answers = problem.Get("result")
-			}
-
-			// 处理 options
-			options := map[string]string{}
-			problem.Get("options").ForEach(func(_, option gjson.Result) bool {
-				key := option.Get("key").String()
-				value := option.Get("value").String()
-				options[key] = value
-				return true
-			})
-
-			qa := map[string]interface{}{
-				"presentation_id": presentationID,
-				"problemId":       problemID,
-				"problemType":     problemType,
-				"question":        question,
-				"answers":         answers.Value(),
-				"options":         options,
-			}
-
-			qaList = append(qaList, qa)
-		}
-		return true
-	})
-
-	// 读取已有的 bank.json 文件
-	var existingQAList []map[string]interface{}
-	bankFilePath := "./bank.json"
-	bankFileData, err := os.ReadFile(bankFilePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			existingQAList = []map[string]interface{}{}
-		} else {
-			log.Println("Error reading bank.json:", err)
-			return
-		}
-	} else {
-		if err := json.Unmarshal(bankFileData, &existingQAList); err != nil {
-			log.Println("Error parsing bank.json:", err)
-			return
-		}
-	}
-	// 将原有的题目中所有presentation_id为当前presentationID的题目删除
-	for i := 0; i < len(existingQAList); i++ {
-		if existingQAList[i]["presentation_id"] == presentationID {
-			existingQAList = append(existingQAList[:i], existingQAList[i+1:]...) // 删除当前presentationID的题目
-			i--
-		}
-	}
-	// 将新问题追加到已有列表中
-	existingQAList = append(existingQAList, qaList...)
-
-	// 将更新后的数据写回 bank.json
-	updatedData, err := json.MarshalIndent(existingQAList, "", "    ")
-	if err != nil {
-		log.Println("Error marshaling data:", err)
-		return
-	}
-
-	err = os.WriteFile(bankFilePath, updatedData, 0644)
-	if err != nil {
-		log.Println("Error writing to bank.json:", err)
-		return
-	}
-
-	log.Println("--------------------------题库更新成功---------------------")
-}
-
 // 异步获取PPT
 func StorePPT(sessionid, presentationID, auth string) error {
 	// Create the request
@@ -334,7 +239,7 @@ func StorePPT(sessionid, presentationID, auth string) error {
 	}
 
 	log.Printf("-----------PPT文件保存在: %s------------\n", fileName)
-	UpdateBanks(presentationID) // 更新题库
+	// 不再更新本地题库，完全依赖远程API
 	return nil
 }
 
@@ -348,27 +253,78 @@ func CompensateSubmit(sessionid string, auth string, unlockedproblem []gjson.Res
 	log.Println("--------------答案提交补偿机制运行完成--------------")
 }
 
+// GetAnswerFromAPI 从远程API获取答案
+func GetAnswerFromAPI(problemId string, sessionid string) (int, string, string, error) {
+	// 构建请求数据
+	requestData := map[string]interface{}{
+		"card":        "", // 根据实际情况可能需要设置
+		"severDomain": "www.yuketang.cn",
+		"problemType": 0, // 需要从其他地方获取problemType
+		"sessionId":   sessionid,
+	}
+
+	// 将数据转换为JSON格式
+	jsonData, err := json.Marshal(requestData)
+	if err != nil {
+		return 0, "", "", fmt.Errorf("JSON序列化失败: %v", err)
+	}
+
+	// 创建HTTP请求
+	url := fmt.Sprintf("https://xkt.hqs.qzz.io/getAnswer?problemID=%s", problemId)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return 0, "", "", fmt.Errorf("创建请求失败: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// 发送请求
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", "", fmt.Errorf("发送请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// 读取响应
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, "", "", fmt.Errorf("读取响应失败: %v", err)
+	}
+
+	// 解析响应
+	result := gjson.Parse(string(body))
+
+	// 检查API响应状态
+	if result.Get("code").String() != "200" || !result.Get("success").Bool() {
+		return 0, "", "", fmt.Errorf("API返回错误: %s", result.Get("message").String())
+	}
+
+	// 获取答案信息（新API格式只返回answer字段）
+	answers := result.Get("data.answer").String()
+
+	// 由于新API不返回problemType和question，需要返回默认值
+	// problemType默认为0（需要根据实际情况调整）
+	// question默认为空字符串
+	problemType := 0
+	question := ""
+
+	return problemType, answers, question, nil
+}
+
 // solveProblem 函数 功能：提交问题答案 参数： 返回值：
 func PostAnswer(sessionid string, auth string, problemId string, delay map[string]int, signal int) {
-	// 读取并解析bank.json文件
-	bankData, err := os.ReadFile("./bank.json")
+	// 从远程API获取答案
+	problemType, answers, question, err := GetAnswerFromAPI(problemId, sessionid)
 	if err != nil {
-		log.Println("读取bank.json文件失败:", err)
+		log.Printf("从API获取答案失败: %v，无法获取题目答案", err)
 		return
 	}
 
-	banks := gjson.Parse(string(bankData)).Array()
-	var problemType int
-	var answers string
-	var question string
-
-	for _, bank := range banks {
-		if bank.Get("problemId").String() == problemId {
-			problemType = int(bank.Get("problemType").Int())
-			answers = bank.Get("answers").String()
-			question = bank.Get("question").String()
-			break
-		}
+	// 检查是否成功获取到答案
+	if answers == "" {
+		log.Printf("题目标号为%s的题目在远程API中未找到答案", problemId)
+		return
 	}
 
 	// 构建请求数据
